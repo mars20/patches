@@ -1,0 +1,288 @@
+diff --git a/build-spike-only.sh b/build-spike-only.sh
+index ac3fda5..dc76b19 100755
+--- a/build-spike-only.sh
++++ b/build-spike-only.sh
+@@ -7,6 +7,5 @@
+ echo "Starting RISC-V Toolchain build process"
+ 
+ build_project riscv-fesvr --prefix=$RISCV
+-build_project riscv-isa-sim --prefix=$RISCV --with-fesvr=$RISCV
+-
++build_project riscv-isa-sim --prefix=$RISCV --with-fesvr=$RISCV --enable-inst-histogram
+ echo -e "\\nRISC-V Toolchain installation completed!"
+diff --git a/build-spike-pk.sh b/build-spike-pk.sh
+index 02f3202..c0a1e59 100755
+--- a/build-spike-pk.sh
++++ b/build-spike-pk.sh
+@@ -14,7 +14,7 @@ fi
+ echo "Starting RISC-V Toolchain build process"
+ 
+ build_project riscv-fesvr --prefix=$RISCV
+-build_project riscv-isa-sim --prefix=$RISCV --with-fesvr=$RISCV
++build_project riscv-isa-sim --prefix=$RISCV --with-fesvr=$RISCV --enable-histogram
+ CC= CXX= build_project riscv-pk --prefix=$RISCV --host=riscv64-unknown-elf
+ 
+ echo -e "\\nRISC-V Toolchain installation completed!"
+Submodule riscv-isa-sim contains modified content
+diff --git a/riscv-isa-sim/config.h.in b/riscv-isa-sim/config.h.in
+index 137f195..f718021 100644
+--- a/riscv-isa-sim/config.h.in
++++ b/riscv-isa-sim/config.h.in
+@@ -66,6 +66,9 @@
+ /* Define if subproject MCPPBS_SPROJ_NORM is enabled */
+ #undef RISCV_ENABLED
+ 
++/* Enable commit log generation */
++#undef RISCV_ENABLE_INST_HISTOGRAM
++
+ /* Enable commit log generation */
+ #undef RISCV_ENABLE_COMMITLOG
+ 
+diff --git a/riscv-isa-sim/configure b/riscv-isa-sim/configure
+index 015f63e..e86d8d4 100755
+--- a/riscv-isa-sim/configure
++++ b/riscv-isa-sim/configure
+@@ -705,6 +705,7 @@ with_isa
+ with_fesvr
+ enable_commitlog
+ enable_histogram
++enable_inst_histogram
+ enable_dirty
+ enable_misaligned
+ '
+@@ -1351,6 +1352,7 @@ Optional Features:
+                           Enable all optional subprojects
+   --enable-commitlog      Enable commit log generation
+   --enable-histogram      Enable PC histogram generation
++  --enable-inst-histogram Enable instruction histogram generation
+   --enable-dirty          Enable hardware management of PTE accessed and dirty
+                           bits
+   --enable-misaligned     Enable hardware support for misaligned loads and
+@@ -4648,6 +4650,18 @@ else
+   as_fn_error $? "libpthread is required" "$LINENO" 5
+ fi
+ 
++# Check whether --enable-inst-histogram was given.
++if test "${enable_inst_histogram+set}" = set; then :
++  enableval=$enable_inst_histogram;
++fi
++
++if test "x$enable_inst_histogram" = "xyes"; then :
++
++
++$as_echo "#define RISCV_ENABLE_INST_HISTOGRAM /**/" >>confdefs.h
++
++
++fi
+ 
+ # Check whether --enable-commitlog was given.
+ if test "${enable_commitlog+set}" = set; then :
+diff --git a/riscv-isa-sim/riscv/execute.cc b/riscv-isa-sim/riscv/execute.cc
+index 878893c..acb187a 100644
+--- a/riscv-isa-sim/riscv/execute.cc
++++ b/riscv-isa-sim/riscv/execute.cc
+@@ -70,6 +70,14 @@ inline void processor_t::update_histogram(reg_t pc)
+ #endif
+ }
+ 
++inline void processor_t::update_inst_histogram(std::string inst)
++{
++#ifdef RISCV_ENABLE_INST_HISTOGRAM
++  auto token = inst.substr(0, inst.find(' '));
++  inst_histogram[token]++;
++#endif
++}
++
+ // This is expected to be inlined by the compiler so each use of execute_insn
+ // includes a duplicated body of the function to get separate fetch.func
+ // function calls.
+@@ -80,6 +88,7 @@ static reg_t execute_insn(processor_t* p, reg_t pc, insn_fetch_t fetch)
+   if (!invalid_pc(npc)) {
+     commit_log_print_insn(p->get_state(), pc, fetch.insn);
+     p->update_histogram(pc);
++    p->update_inst_histogram(p->get_disasm(fetch.insn));
+   }
+   return npc;
+ }
+diff --git a/riscv-isa-sim/riscv/processor.cc b/riscv-isa-sim/riscv/processor.cc
+index 8cca490..c787563 100644
+--- a/riscv-isa-sim/riscv/processor.cc
++++ b/riscv-isa-sim/riscv/processor.cc
+@@ -43,6 +43,14 @@ processor_t::~processor_t()
+       fprintf(stderr, "%0" PRIx64 " %" PRIu64 "\n", it.first, it.second);
+   }
+ #endif
++#ifdef RISCV_ENABLE_INST_HISTOGRAM
++  if(inst_histogram_enabled)
++  {
++    fprintf(stderr, "Inst Histogram size:%zu\n", inst_histogram.size());
++    for (auto it : inst_histogram)
++      fprintf(stderr, "%s" " %" PRIu64 "\n", it.first.c_str(), it.second);
++  }
++#endif
+ 
+   delete mmu;
+   delete disassembler;
+@@ -144,6 +152,17 @@ void processor_t::set_histogram(bool value)
+ #endif
+ }
+ 
++void processor_t::set_inst_histogram(bool value)
++{
++  inst_histogram_enabled = value;
++#ifndef RISCV_ENABLE_INST_HISTOGRAM
++  if (value) {
++    fprintf(stderr, "Instruction Histogram support has not been properly enabled;");
++    fprintf(stderr, " please re-build the riscv-isa-sim project using \"configure --enable-inst-histogram\".\n");
++  }
++#endif
++}
++
+ void processor_t::reset()
+ {
+   state.reset();
+@@ -316,6 +335,11 @@ void processor_t::disasm(insn_t insn)
+   }
+ }
+ 
++std::string processor_t::get_disasm(insn_t insn)
++{
++  return disassembler->disassemble(insn);
++}
++
+ int processor_t::paddr_bits()
+ {
+   assert(xlen == max_xlen);
+diff --git a/riscv-isa-sim/riscv/processor.h b/riscv-isa-sim/riscv/processor.h
+index 1b94b1f..dd0d0b3 100644
+--- a/riscv-isa-sim/riscv/processor.h
++++ b/riscv-isa-sim/riscv/processor.h
+@@ -8,6 +8,7 @@
+ #include <string>
+ #include <vector>
+ #include <map>
++#include <unordered_map>
+ #include "debug_rom/debug_rom_defines.h"
+ 
+ class processor_t;
+@@ -167,6 +168,7 @@ public:
+ 
+   void set_debug(bool value);
+   void set_histogram(bool value);
++  void set_inst_histogram(bool value);
+   void reset();
+   void step(size_t n); // run for n cycles
+   void set_csr(int which, reg_t val);
+@@ -188,6 +190,8 @@ public:
+   void set_privilege(reg_t);
+   void yield_load_reservation() { state.load_reservation = (reg_t)-1; }
+   void update_histogram(reg_t pc);
++  void update_inst_histogram(std::string inst);
++  std::string get_disasm(insn_t insn);
+   const disassembler_t* get_disassembler() { return disassembler; }
+ 
+   void register_insn(insn_desc_t);
+@@ -299,10 +303,12 @@ private:
+   reg_t max_isa;
+   std::string isa_string;
+   bool histogram_enabled;
++  bool inst_histogram_enabled;
+   bool halt_on_reset;
+ 
+   std::vector<insn_desc_t> instructions;
+   std::map<reg_t,uint64_t> pc_histogram;
++  std::unordered_map<std::string,uint64_t> inst_histogram;
+ 
+   static const size_t OPCODE_CACHE_SIZE = 8191;
+   insn_desc_t opcode_cache[OPCODE_CACHE_SIZE];
+diff --git a/riscv-isa-sim/riscv/riscv.ac b/riscv-isa-sim/riscv/riscv.ac
+index 68bcdb5..8578c21 100644
+--- a/riscv-isa-sim/riscv/riscv.ac
++++ b/riscv-isa-sim/riscv/riscv.ac
+@@ -23,6 +23,11 @@ AC_CHECK_LIB(fesvr, libfesvr_is_present, [], [AC_MSG_ERROR([libfesvr is required
+ 
+ AC_CHECK_LIB(pthread, pthread_create, [], [AC_MSG_ERROR([libpthread is required])])
+ 
++AC_ARG_ENABLE([instHistogram], AS_HELP_STRING([--enable-inst-histogram], [Enable Instruction histogram generation]))
++AS_IF([test "x$enable_inst_histogram" = "xyes"], [
++  AC_DEFINE([RISCV_ENABLE_INST_HISTOGRAM],,[Enable Instruction histogram generation])
++])
++
+ AC_ARG_ENABLE([commitlog], AS_HELP_STRING([--enable-commitlog], [Enable commit log generation]))
+ AS_IF([test "x$enable_commitlog" = "xyes"], [
+   AC_DEFINE([RISCV_ENABLE_COMMITLOG],,[Enable commit log generation])
+diff --git a/riscv-isa-sim/riscv/sim.cc b/riscv-isa-sim/riscv/sim.cc
+index 009bb98..bad0f47 100644
+--- a/riscv-isa-sim/riscv/sim.cc
++++ b/riscv-isa-sim/riscv/sim.cc
+@@ -136,6 +136,14 @@ void sim_t::set_histogram(bool value)
+   }
+ }
+ 
++void sim_t::set_inst_histogram(bool value)
++{
++  inst_histogram_enabled = value;
++  for (size_t i = 0; i < procs.size(); i++) {
++    procs[i]->set_inst_histogram(inst_histogram_enabled);
++  }
++}
++
+ void sim_t::set_procs_debug(bool value)
+ {
+   for (size_t i=0; i< procs.size(); i++)
+diff --git a/riscv-isa-sim/riscv/sim.h b/riscv-isa-sim/riscv/sim.h
+index 47f3a45..7f78931 100644
+--- a/riscv-isa-sim/riscv/sim.h
++++ b/riscv-isa-sim/riscv/sim.h
+@@ -30,6 +30,7 @@ public:
+   void set_debug(bool value);
+   void set_log(bool value);
+   void set_histogram(bool value);
++  void set_inst_histogram(bool value);
+   void set_procs_debug(bool value);
+   void set_remote_bitbang(remote_bitbang_t* remote_bitbang) {
+     this->remote_bitbang = remote_bitbang;
+@@ -58,6 +59,7 @@ private:
+   bool debug;
+   bool log;
+   bool histogram_enabled; // provide a histogram of PCs
++  bool inst_histogram_enabled;
+   remote_bitbang_t* remote_bitbang;
+ 
+   // memory-mapped I/O routines
+diff --git a/riscv-isa-sim/spike_main/spike.cc b/riscv-isa-sim/spike_main/spike.cc
+index f77d488..f4d9a72 100644
+--- a/riscv-isa-sim/spike_main/spike.cc
++++ b/riscv-isa-sim/spike_main/spike.cc
+@@ -24,6 +24,7 @@ static void help()
+   fprintf(stderr, "  -d                    Interactive debug mode\n");
+   fprintf(stderr, "  -g                    Track histogram of PCs\n");
+   fprintf(stderr, "  -l                    Generate a log of execution\n");
++  fprintf(stderr, "  -i                    Generate histogram instruction execution\n");
+   fprintf(stderr, "  -h                    Print this help message\n");
+   fprintf(stderr, "  -H                    Start halted, allowing a debugger to connect\n");
+   fprintf(stderr, "  --isa=<name>          RISC-V ISA string [default %s]\n", DEFAULT_ISA);
+@@ -78,6 +79,7 @@ int main(int argc, char** argv)
+   bool debug = false;
+   bool halted = false;
+   bool histogram = false;
++  bool instHist = false;
+   bool log = false;
+   bool dump_dts = false;
+   size_t nprocs = 1;
+@@ -111,6 +113,7 @@ int main(int argc, char** argv)
+   parser.option('h', 0, 0, [&](const char* s){help();});
+   parser.option('d', 0, 0, [&](const char* s){debug = true;});
+   parser.option('g', 0, 0, [&](const char* s){histogram = true;});
++  parser.option('i', 0, 0, [&](const char* s){instHist = true;});
+   parser.option('l', 0, 0, [&](const char* s){log = true;});
+   parser.option('p', 0, 1, [&](const char* s){nprocs = atoi(s);});
+   parser.option('m', 0, 1, [&](const char* s){mems = make_mems(s);});
+@@ -170,5 +173,6 @@ int main(int argc, char** argv)
+   s.set_debug(debug);
+   s.set_log(log);
+   s.set_histogram(histogram);
++  s.set_inst_histogram(instHist);
+   return s.run();
+ }
+
